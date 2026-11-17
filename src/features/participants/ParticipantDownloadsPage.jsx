@@ -1,231 +1,353 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { apiBlobRequest } from "../../services/api.js";
 import { formatDateTime, formatError } from "../../utils/eventFormatters.js";
 import { Alert } from "../../shared/components/Alert.jsx";
 
-const PAYMENT_STATUSES = [
-  ["", "All payment statuses"],
-  ["VERIFIED", "Verified"],
-  ["PENDING", "Pending"],
-  ["REJECTED", "Rejected"],
-  ["NOT_REQUIRED", "Not required"],
+const FIELD_GROUPS = [
+  {
+    title: "Event information",
+    description: "Identify which event each participant belongs to.",
+    fields: [
+      ["EVENT_ID", "Event ID"],
+      ["EVENT_NAME", "Event name"],
+      ["CATEGORY", "Category"],
+      ["EVENT_TYPE", "Event type"],
+      ["EVENT_DATE", "Event date"],
+      ["VENUE", "Venue"],
+    ],
+  },
+  {
+    title: "Registration information",
+    description: "Registration, payment and fee details.",
+    fields: [
+      ["REGISTRATION_ID", "Registration ID"],
+      ["REGISTRATION_CODE", "Registration code"],
+      ["REGISTRATION_DATE", "Registration date"],
+      ["REGISTRATION_TYPE", "Registration type"],
+      ["REGISTRATION_STATUS", "Registration status"],
+      ["PAYMENT_STATUS", "Payment status"],
+      ["AMOUNT_DUE", "Amount due"],
+      ["NUMBER_OF_MEMBERS", "Number of members"],
+    ],
+  },
+  {
+    title: "Participant information",
+    description: "The primary registrant and additional team members appear as separate rows.",
+    fields: [
+      ["FIRST_NAME", "First name"],
+      ["MIDDLE_NAME", "Middle name"],
+      ["LAST_NAME", "Last name"],
+      ["EMAIL", "Email"],
+      ["PHONE_NUMBER", "Phone number"],
+      ["COLLEGE_NAME", "College name"],
+      ["COURSE", "Course"],
+      ["PARTICIPANT_TYPE", "Participant type"],
+    ],
+  },
+  {
+    title: "Additional information",
+    description: "Optional activity and status fields.",
+    fields: [
+      ["EVENT_FEE", "Event fee"],
+      ["EVENT_ACTIVE_STATUS", "Event active status"],
+      ["REGISTRATION_ACTIVE_STATUS", "Registration active status"],
+      ["PARTICIPANT_ACTIVE_STATUS", "Participant active status"],
+    ],
+  },
 ];
 
-const REGISTRATION_STATUSES = [
-  ["", "All registration statuses"],
-  ["APPROVED", "Approved"],
-  ["PENDING", "Pending"],
-  ["REJECTED", "Rejected"],
-  ["CANCELLED", "Cancelled"],
+const DEFAULT_FIELDS = [
+  "EVENT_NAME",
+  "REGISTRATION_CODE",
+  "FIRST_NAME",
+  "LAST_NAME",
+  "EMAIL",
+  "PHONE_NUMBER",
+  "COLLEGE_NAME",
+  "COURSE",
+  "PARTICIPANT_TYPE",
 ];
 
-export function ParticipantDownloadsPage({ token, events }) {
-  const [selectedEventIds, setSelectedEventIds] = useState([]);
-  const [selectionInitialized, setSelectionInitialized] = useState(false);
-  const [query, setQuery] = useState("");
-  const [paymentStatus, setPaymentStatus] = useState("");
-  const [registrationStatus, setRegistrationStatus] = useState("");
-  const [includeTeamMembers, setIncludeTeamMembers] = useState(true);
-  const [working, setWorking] = useState("");
+const ALL_FIELDS = FIELD_GROUPS.flatMap((group) => group.fields.map(([key]) => key));
+
+export function ParticipantDownloadsPage({ token, events = [] }) {
+  const [exportType, setExportType] = useState("EVENT");
+  const [eventId, setEventId] = useState(events[0]?.id ? String(events[0].id) : "");
+  const [selectedFields, setSelectedFields] = useState(DEFAULT_FIELDS);
+  const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
-  useEffect(() => {
-    if (!selectionInitialized && events.length > 0) {
-      setSelectedEventIds(events.map((event) => String(event.id)));
-      setSelectionInitialized(true);
-    }
-  }, [events, selectionInitialized]);
+  const selectedEvent = useMemo(
+    () => events.find((event) => String(event.id) === eventId),
+    [events, eventId],
+  );
 
-  const filteredEvents = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
-    if (!normalizedQuery) return events;
-    return events.filter((event) =>
-      [event.eventName, event.venue, event.category?.name, event.eventType?.name]
-        .filter(Boolean)
-        .some((value) => value.toLowerCase().includes(normalizedQuery)),
-    );
-  }, [events, query]);
-
-  function toggleEvent(eventId) {
-    const id = String(eventId);
-    setSelectedEventIds((current) => current.includes(id)
-      ? current.filter((selectedId) => selectedId !== id)
-      : [...current, id]);
+  function toggleField(field) {
+    setSelectedFields((current) => current.includes(field)
+      ? current.filter((item) => item !== field)
+      : [...current, field]);
   }
 
-  async function downloadParticipants(eventIds, downloadType) {
-    if (!eventIds.length) {
-      setError("Select at least one event to download.");
+  function selectGroup(fields) {
+    setSelectedFields((current) => {
+      const allSelected = fields.every((field) => current.includes(field));
+      return allSelected
+        ? current.filter((field) => !fields.includes(field))
+        : [...new Set([...current, ...fields])];
+    });
+  }
+
+  async function downloadParticipants() {
+    if (exportType === "EVENT" && !eventId) {
+      setError("Select an event before generating the export.");
       return;
     }
-    setWorking(downloadType);
+    if (selectedFields.length === 0) {
+      setError("Select at least one field to export.");
+      return;
+    }
+
+    setWorking(true);
     setError("");
     setNotice("");
-    try {
-      const params = new URLSearchParams();
-      eventIds.forEach((eventId) => params.append("eventIds", eventId));
-      if (paymentStatus) params.set("paymentStatus", paymentStatus);
-      if (registrationStatus) params.set("registrationStatus", registrationStatus);
-      params.set("includeTeamMembers", String(includeTeamMembers));
 
+    const request = {
+      exportType,
+      eventId: exportType === "EVENT" ? Number(eventId) : null,
+      selectedFields,
+    };
+
+    try {
       const workbook = await apiBlobRequest(
-        `/v1/admin/participants/export.xlsx?${params.toString()}`,
-        { token },
+        "/v1/admin/exports/participants",
+        {
+          token,
+          method: "POST",
+          body: request,
+        },
       );
-      const eventLabel = eventIds.length === 1
-        ? safeFilename(events.find((event) => String(event.id) === eventIds[0])?.eventName || "event")
-        : "selected-events";
-      saveBlob(workbook, `participants-${eventLabel}-${dateStamp()}.xlsx`);
-      setNotice("Participant workbook downloaded.");
+
+      const eventLabel = exportType === "EVENT"
+        ? safeFilename(selectedEvent?.eventName || `event-${eventId}`)
+        : "all-events";
+
+      saveBlob(
+        workbook,
+        `participants-${eventLabel}-${dateStamp()}.xlsx`,
+      );
+      setNotice("Participant Excel workbook downloaded successfully.");
     } catch (downloadError) {
       setError(formatError(downloadError));
     } finally {
-      setWorking("");
+      setWorking(false);
     }
   }
-
-  const allVisibleSelected = filteredEvents.length > 0
-    && filteredEvents.every((event) => selectedEventIds.includes(String(event.id)));
 
   return (
     <>
       <section className="page-heading participant-download-heading">
         <div>
-          <div className="eyebrow">EVENT REPORTS</div>
-          <h1>Participant downloads</h1>
-          <p>Export Excel lists for one event or combine multiple events into one workbook.</p>
+          <div className="eyebrow">REPORTS & DATA EXPORT</div>
+          <h1>Participant export</h1>
+          <p>Build an Excel report for one event or combine participants from every event.</p>
         </div>
-        <div className="participant-download-actions">
-          <button
-            className="button button-secondary"
-            type="button"
-            disabled={working !== "" || events.length === 0}
-            onClick={() => downloadParticipants(events.map((event) => String(event.id)), "all")}
-          >
-            {working === "all" ? "Preparing…" : "Download all events"}
-          </button>
-          <button
-            className="button button-primary"
-            type="button"
-            disabled={working !== "" || selectedEventIds.length === 0}
-            onClick={() => downloadParticipants(selectedEventIds, "selected")}
-          >
-            {working === "selected" ? "Preparing…" : `Download selected (${selectedEventIds.length})`}
-          </button>
+        <div className="participant-export-heading-meta">
+          <span className="participant-export-meta-icon" aria-hidden="true">▤</span>
+          <span>
+            <strong>{events.length}</strong>
+            <small>Events available</small>
+          </span>
         </div>
       </section>
 
       {error && <Alert onDismiss={() => setError("")}>{error}</Alert>}
       {notice && <Alert variant="success" onDismiss={() => setNotice("")}>{notice}</Alert>}
 
-      <section className="review-panel participant-download-panel">
+      <section className="review-panel participant-builder-panel">
         <header className="panel-heading">
           <div>
-            <h2>Choose events and download options</h2>
-            <p>Multi-event downloads include a combined participant tab and a separate tab for each event.</p>
+            <h2>1. Choose export scope</h2>
+            <p>Select an individual event or export participants across all events.</p>
           </div>
         </header>
 
-        <div className="participant-export-options">
-          <label className="participant-export-field">
-            Payment status
-            <select value={paymentStatus} onChange={(event) => setPaymentStatus(event.target.value)}>
-              {PAYMENT_STATUSES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-            </select>
-          </label>
-          <label className="participant-export-field">
-            Registration status
-            <select value={registrationStatus} onChange={(event) => setRegistrationStatus(event.target.value)}>
-              {REGISTRATION_STATUSES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-            </select>
-          </label>
-          <label className="participant-export-checkbox">
-            <input
-              type="checkbox"
-              checked={includeTeamMembers}
-              onChange={(event) => setIncludeTeamMembers(event.target.checked)}
-            />
-            <span>
-              <strong>Include teammates as separate rows</strong>
-              <small>When off, exports only one row for each registration leader.</small>
-            </span>
-          </label>
-        </div>
-
-        <div className="participant-event-toolbar">
-          <label className="search-field participant-event-search">
-            <span aria-hidden="true">⌕</span>
-            <input
-              type="search"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Find an event"
-            />
-          </label>
+        <div className="participant-export-mode-grid">
           <button
-            className="text-action"
             type="button"
-            onClick={() => setSelectedEventIds((current) => allVisibleSelected
-              ? current.filter((id) => !filteredEvents.some((event) => String(event.id) === id))
-              : [...new Set([...current, ...filteredEvents.map((event) => String(event.id))])])}
+            className={`participant-export-mode ${exportType === "EVENT" ? "selected" : ""}`}
+            onClick={() => setExportType("EVENT")}
+            aria-pressed={exportType === "EVENT"}
           >
-            {allVisibleSelected ? "Clear visible" : "Select visible"}
+            <span className="participant-mode-icon" aria-hidden="true">◷</span>
+            <span className="participant-mode-copy">
+              <strong>Event-wise export</strong>
+              <small>Export participants from one selected event.</small>
+            </span>
+            <span className="participant-mode-radio" aria-hidden="true" />
+          </button>
+
+          <button
+            type="button"
+            className={`participant-export-mode ${exportType === "ALL" ? "selected" : ""}`}
+            onClick={() => setExportType("ALL")}
+            aria-pressed={exportType === "ALL"}
+          >
+            <span className="participant-mode-icon" aria-hidden="true">▦</span>
+            <span className="participant-mode-copy">
+              <strong>Overall export</strong>
+              <small>Combine participants from all events in one sheet.</small>
+            </span>
+            <span className="participant-mode-radio" aria-hidden="true" />
           </button>
         </div>
 
-        {events.length === 0 ? (
-          <div className="review-empty">No active events are available to export.</div>
-        ) : filteredEvents.length === 0 ? (
-          <div className="review-empty">No events match your search.</div>
+        {exportType === "EVENT" ? (
+          <div className="participant-event-picker">
+            <label className="participant-export-field" htmlFor="participant-event-select">
+              Select event
+              <select
+                id="participant-event-select"
+                value={eventId}
+                onChange={(event) => setEventId(event.target.value)}
+                disabled={events.length === 0}
+              >
+                <option value="">Choose an event</option>
+                {events.map((event) => (
+                  <option key={event.id} value={String(event.id)}>
+                    {event.eventName}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {selectedEvent && (
+              <div className="participant-selected-event">
+                <span className="participant-selected-event-icon" aria-hidden="true">✓</span>
+                <span>
+                  <strong>{selectedEvent.eventName}</strong>
+                  <small>
+                    {selectedEvent.eventDateTime ? formatDateTime(selectedEvent.eventDateTime) : "Date not available"}
+                    {" · "}
+                    {selectedEvent.currentParticipants || 0} registered participants
+                  </small>
+                </span>
+              </div>
+            )}
+            {events.length === 0 && (
+              <p className="participant-inline-empty">No events are currently available.</p>
+            )}
+          </div>
         ) : (
-          <div className="participant-event-list">
-            {filteredEvents.map((event) => {
-              const id = String(event.id);
-              return (
-                <article className="participant-event-item" key={id}>
-                  <label className="participant-event-select">
-                    <input
-                      type="checkbox"
-                      checked={selectedEventIds.includes(id)}
-                      onChange={() => toggleEvent(id)}
-                    />
-                    <span className="participant-event-details">
-                      <strong>{event.eventName}</strong>
-                      <small>{formatDateTime(event.eventDateTime)} · {event.currentParticipants || 0} participants registered</small>
-                    </span>
-                  </label>
-                  <button
-                    className="button button-secondary button-small"
-                    type="button"
-                    disabled={working !== ""}
-                    onClick={() => downloadParticipants([id], id)}
-                  >
-                    {working === id ? "Preparing…" : "Download event"}
-                  </button>
-                </article>
-              );
-            })}
+          <div className="participant-overall-note">
+            <span className="participant-overall-icon" aria-hidden="true">▦</span>
+            <span>
+              <strong>All events will be included</strong>
+              <small>The workbook will contain one combined Participants worksheet. The Event Name field is recommended to identify each participant's event.</small>
+            </span>
           </div>
         )}
-        <footer className="participant-export-note">
-          Amount due is shown once on each group leader row to avoid counting the same group payment multiple times.
-          Team members inherit the registration’s payment and registration statuses.
+      </section>
+
+      <section className="review-panel participant-builder-panel">
+        <header className="panel-heading participant-fields-heading">
+          <div>
+            <h2>2. Choose fields</h2>
+            <p>Choose the columns you want in your Excel workbook. This selection works for both export modes.</p>
+          </div>
+          <div className="participant-field-count">
+            <strong>{selectedFields.length}</strong>
+            <span>of {ALL_FIELDS.length} selected</span>
+          </div>
+        </header>
+
+        <div className="participant-field-toolbar">
+          <span>{selectedFields.length === 0 ? "No fields selected" : `${selectedFields.length} columns will be included`}</span>
+          <div>
+            <button type="button" className="text-action" onClick={() => setSelectedFields(ALL_FIELDS)}>
+              Select all
+            </button>
+            <span className="participant-toolbar-divider">·</span>
+            <button type="button" className="text-action" onClick={() => setSelectedFields([])}>
+              Clear all
+            </button>
+          </div>
+        </div>
+
+        <div className="participant-field-groups">
+          {FIELD_GROUPS.map((group) => {
+            const keys = group.fields.map(([key]) => key);
+            const groupSelected = keys.every((key) => selectedFields.includes(key));
+            return (
+              <section className="participant-field-group" key={group.title}>
+                <header>
+                  <div>
+                    <h3>{group.title}</h3>
+                    <p>{group.description}</p>
+                  </div>
+                  <button type="button" className="text-action" onClick={() => selectGroup(keys)}>
+                    {groupSelected ? "Clear group" : "Select group"}
+                  </button>
+                </header>
+                <div className="participant-field-options">
+                  {group.fields.map(([key, label]) => (
+                    <label className="participant-field-option" key={key}>
+                      <input
+                        type="checkbox"
+                        checked={selectedFields.includes(key)}
+                        onChange={() => toggleField(key)}
+                      />
+                      <span>{label}</span>
+                    </label>
+                  ))}
+                </div>
+              </section>
+            );
+          })}
+        </div>
+
+        <footer className="participant-builder-footer">
+          <div className="participant-export-summary">
+            <span className="participant-summary-icon" aria-hidden="true">✓</span>
+            <span>
+              <strong>{exportType === "EVENT" ? "Event-wise workbook" : "Overall workbook"}</strong>
+              <small>
+                {exportType === "EVENT"
+                  ? (selectedEvent?.eventName || "Select an event to continue")
+                  : "All events · One combined Participants sheet"}
+                {" · "}
+                {selectedFields.length} selected columns
+              </small>
+            </span>
+          </div>
+          <button
+            className="button button-primary participant-generate-button"
+            type="button"
+            onClick={downloadParticipants}
+            disabled={working || selectedFields.length === 0 || (exportType === "EVENT" && !eventId)}
+          >
+            <span aria-hidden="true">↓</span>
+            {working ? "Generating Excel…" : "Generate & download Excel"}
+          </button>
         </footer>
       </section>
+
+      <div className="participant-export-help">
+        <strong>Participant rows</strong>
+        <span>The primary registrant is included as the solo participant or team leader. Additional team members are included as separate rows and inherit the registration's event and registration details.</span>
+      </div>
     </>
   );
 }
 
 function saveBlob(blob, filename) {
-  const url = URL.createObjectURL(blob);
+  const fileUrl = URL.createObjectURL(blob);
   const link = document.createElement("a");
-  link.href = url;
+  link.href = fileUrl;
   link.download = filename;
   document.body.appendChild(link);
   link.click();
   link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  window.setTimeout(() => URL.revokeObjectURL(fileUrl), 1500);
 }
 
 function safeFilename(value) {
